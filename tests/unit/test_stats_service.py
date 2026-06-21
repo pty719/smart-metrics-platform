@@ -115,9 +115,9 @@ class TestGetAnomalies:
 
     @pytest.mark.asyncio
     async def test_detects_outliers(self, db_session: AsyncSession) -> None:
-        """Values far from the mean should be flagged as anomalies."""
-        # mean=5, std~2.236, 3σ ~ 6.7 → [−1.7, 11.7]
-        # 100 is an anomaly
+        """Values outside the IQR bounds should be flagged as anomalies."""
+        # IQR: Q1=4.25, Q3=42.25 → upper bound = 42.25 + 1.5*38 = 99.25
+        # 100 > 99.25, so it is detected as an outlier
         vals = [3.0, 4.0, 5.0, 6.0, 7.0, 100.0]
         await _seed_metric_with_values(db_session, "a1", vals)
 

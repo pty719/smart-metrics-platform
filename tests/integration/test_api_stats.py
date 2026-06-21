@@ -37,16 +37,17 @@ def _patch_redis():
 async def metric_with_data(client: AsyncClient, api_key: str) -> str:
     """Create a metric and upload sample data; return its name."""
     name = "int_test_metric"
-    # Create metric
     await client.post(
         "/api/v1/metrics",
         json={"name": name, "unit": "℃"},
         headers={"Authorization": f"Bearer {api_key}"},
     )
-    # Upload data: [10, 20, 30, 40, 100 (outlier)]
+    # Upload data: tight cluster [10, 12, 11, 13] + extreme outlier 100
+    # IQR: Q1=10.75, Q3=12.25 → upper bound = 12.25 + 1.5*1.5 = 14.5
+    # 100 is well above 14.5 and will be detected.
     await client.post(
         f"/api/v1/metrics/{name}/data",
-        json={"datapoints": [{"value": v} for v in [10, 20, 30, 40, 100]]},
+        json={"datapoints": [{"value": v} for v in [10, 12, 11, 13, 100]]},
         headers={"Authorization": f"Bearer {api_key}"},
     )
     return name
