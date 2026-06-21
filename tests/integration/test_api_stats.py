@@ -28,7 +28,6 @@ def _patch_redis():
     """Automatically patch ``get_redis`` for every test in this module."""
     mock = _mock_redis()
     with (
-        patch("app.api.v1.endpoints.stats.get_redis", return_value=mock),
         patch("app.services.stats_service.get_redis", return_value=mock),
     ):
         yield
@@ -112,7 +111,7 @@ class TestGetAnomalies:
         )
         assert resp.status_code == 200
         data = resp.json()["data"]
-        # 100 is > mean + 3σ
+        # 100 is outside the IQR bounds and should be detected
         assert data["anomaly_count"] >= 1
         values = [a["value"] for a in data["anomalies"]]
         assert 100.0 in values

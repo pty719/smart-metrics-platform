@@ -120,16 +120,23 @@ async def get_anomalies(
     db: AsyncSession,
     metric_name: str,
 ) -> dict:
-    """Return datapoints that deviate more than 3σ from the mean.
+    """Return datapoints that are statistical outliers.
 
-    Uses the 3-sigma rule: values outside ``[mean - 3*σ, mean + 3*σ]``
-    are considered anomalies.
+    Uses the **IQR (Interquartile Range)** method, which is more robust
+    to extreme values than the classic 3-sigma rule::
+
+        Q1, Q3 = 25th and 75th percentiles
+        IQR = Q3 - Q1
+        lower = Q1 - 1.5 * IQR
+        upper = Q3 + 1.5 * IQR
+
+    Values outside ``[lower, upper]`` are flagged as anomalies.
 
     Cached in Redis for ``settings.CACHE_TTL_ANOMALIES`` seconds (default 60).
 
     Returns
     -------
-    dict with keys: ``metric_name``, ``mean``, ``std_dev``,
+    dict with keys: ``metric_name``, ``anomaly_count``,
     ``threshold_lower``, ``threshold_upper``, ``anomalies`` (list of
     ``{"id": ..., "value": ..., "timestamp": ...}``).
     """
@@ -155,11 +162,13 @@ async def get_anomalies(
         raise InvalidDataError(f"指标 '{metric_name}' 尚无数据点")
 
     values = [float(dp.value) for dp in datapoints]
-    mean = statistics.mean(values)
-    std_dev = statistics.stdev(values) if len(values) >= 2 else 0.0
+    sorted_vals = sorted(values)
 
-    lower = mean - 3 * std_dev
-    upper = mean + 3 * std_dev
+    # IQR method — more robust to extreme values than 3-sigma
+    q1, q2, q3 = statistics.quantiles(sorted_vals, n=4)
+    iqr = q3 - q1
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
 
     anomalies = []
     for dp in datapoints:
@@ -173,8 +182,6 @@ async def get_anomalies(
 
     result = {
         "metric_name": metric_name,
-        "mean": round(mean, 6),
-        "std_dev": round(std_dev, 6) if len(values) >= 2 else None,
         "threshold_lower": round(lower, 6),
         "threshold_upper": round(upper, 6),
         "anomaly_count": len(anomalies),

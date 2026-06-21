@@ -56,10 +56,11 @@ async def get_anomalies(
     name: str,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict:
-    """Detect anomalies using the 3-sigma rule.
+    """Detect anomalies using the IQR (Interquartile Range) method.
 
-    A data point is flagged as an anomaly when its value lies outside
-    ``[mean - 3σ, mean + 3σ]``.
+    Values outside ``[Q1 - 1.5*IQR, Q3 + 1.5*IQR]`` are flagged
+    as anomalies.  This is more robust to extreme values than the classic
+    3-sigma rule.
 
     Results are cached in Redis (TTL configured in
     ``CACHE_TTL_ANOMALIES``).
