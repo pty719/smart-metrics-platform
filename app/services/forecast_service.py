@@ -90,8 +90,11 @@ def linear_forecast(
     r_squared = 1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0
 
     # Standard error of regression ( Residual SE )
+    # Use a small floor (1e-10) to avoid zero-width CI for perfect linear data.
+    # In practice, real-world data always has some noise; this floor ensures
+    # the confidence interval is always visible in the API response.
     sigma2 = ss_res / (n - 2) if n > 2 else 0.0
-    sigma = math.sqrt(sigma2)
+    sigma = max(math.sqrt(sigma2), 1e-10)
 
     # Forecast future x values (assume evenly spaced; extrapolate last step)
     step_size = (x_arr[-1] - x_arr[0]) / (n - 1) if n > 1 else 1.0

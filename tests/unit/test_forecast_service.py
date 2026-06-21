@@ -41,15 +41,29 @@ class TestLinearForecast:
         assert math.isclose(result["forecast_y"][1], 9.0, rel_tol=1e-6)
 
     def test_confidence_interval_contains_prediction(self) -> None:
-        """Lower bound < prediction < upper bound for each forecast point."""
+        """Lower bound <= prediction <= upper bound for each forecast point.
+
+        Uses noisy data so that sigma > 0 and the CI has non-zero width.
+        With perfect linear data (sigma=0), the CI collapses to a point,
+        which is mathematically correct but not useful for testing.
+        """
+        import math
+
         x = list(range(10))
-        y = [float(i) + 0.1 for i in x]  # roughly y = x
+        # y = x + small noise → sigma > 0, CI has visible width
+        y = [float(i) + 0.3 * math.sin(float(i)) for i in x]
 
         result = linear_forecast(x, y, steps=3, conf_level=0.95)
 
         for i in range(3):
-            assert result["lower_bound"][i] < result["forecast_y"][i]
-            assert result["forecast_y"][i] < result["upper_bound"][i]
+            assert result["lower_bound"][i] <= result["forecast_y"][i]
+            assert result["forecast_y"][i] <= result["upper_bound"][i]
+            # CI should have non-zero width for noisy data
+            ci_width = result["upper_bound"][i] - result["lower_bound"][i]
+            assert ci_width > 1e-6, (
+                f"CI width is effectively zero for noisy data at step {i}: "
+                f"lower={result['lower_bound'][i]}, upper={result['upper_bound'][i]}"
+            )
 
     def test_insufficient_data_raises(self) -> None:
         """Fewer than 2 points must raise InvalidDataError."""
