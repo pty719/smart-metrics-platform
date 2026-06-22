@@ -37,17 +37,35 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
+    REDIS_PASSWORD: str = ""  # Set in production; leave empty for no-auth
 
     @property
     def REDIS_URL(self) -> str:
+        if self.REDIS_PASSWORD:
+            return (
+                f"redis://:{self.REDIS_PASSWORD}"
+                f"@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+            )
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
     # Celery (defaults to REDIS_URL if not set)
     CELERY_BROKER_URL: Optional[str] = None
     CELERY_RESULT_BACKEND: Optional[str] = None
+    CELERY_CONCURRENCY: int = 4  # Number of Celery worker processes
 
     # API Authentication
     API_KEY: str = "dev-api-key-please-change-in-production"
+
+    # CORS — set to a comma-separated list of allowed origins in production,
+    # e.g. "https://dashboard.example.com,https://admin.example.com"
+    # The special value "*" allows all origins (only safe in development).
+    CORS_ORIGINS: list[str] = ["*"]
+
+    # Server workers (Gunicorn) — recommended: 2 × CPU_COUNT + 1
+    WORKERS: int = 2
+
+    # Log format: "json" (production) | "text" (development / human-readable)
+    LOG_FORMAT: str = "json"
 
     # Cache TTL (seconds)
     CACHE_TTL_STATS: int = 300
