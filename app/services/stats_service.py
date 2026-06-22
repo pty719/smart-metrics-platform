@@ -2,37 +2,43 @@
 
 Implements:
 - Descriptive statistics (mean, min, max, std, median)
-- 3-sigma anomaly detection
+- IQR-based anomaly detection
 - Moving average calculation
 
-All expensive computations are cached in Redis with TTL configured
-in ``settings.CACHE_TTL_*``.
+Cache strategy
+--------------
+All read paths go through ``cache_service`` which owns key naming and
+TTL constants (configured in ``settings.CACHE_TTL_*``).
+
+Cache *invalidation* is handled by the write path in
+``datapoint_service.create_datapoints`` — this service never deletes
+cache entries.  The separation keeps read-side and write-side concerns
+cleanly isolated.
 """
 from __future__ import annotations
 
-import json
 import statistics
 from datetime import datetime
-from typing import Optional
 
-from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import InvalidDataError, MetricNotFoundError
-from app.core.redis_client import get_redis
 from app.models.datapoint import Datapoint
 from app.models.metric import Metric
+from app.services import cache_service
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 async def _fetch_all_values(db: AsyncSession, metric_name: str) -> list[float]:
     """Return all datapoint values for *metric_name* ordered by timestamp.
 
-    Raises ``MetricNotFoundError`` when the metric does not exist.
-    Raises ``InvalidDataError`` when the metric has no datapoints.
+    Raises:
+        MetricNotFoundError: When the metric does not exist.
+        InvalidDataError: When the metric has no datapoints.
     """
     metric = await db.scalar(select(Metric).where(Metric.name == metric_name))
     if metric is None:
@@ -49,28 +55,6 @@ async def _fetch_all_values(db: AsyncSession, metric_name: str) -> list[float]:
     return values
 
 
-def _cache_key(metric_name: str, suffix: str) -> str:
-    return f"stats:{metric_name}:{suffix}"
-
-
-async def _get_cached(redis: Redis, key: str):
-    raw = await redis.get(key)
-    if raw is not None:
-        return json.loads(raw)
-    return None
-
-
-async def _set_cached(redis: Redis, key: str, value, ttl: int) -> None:
-    await redis.set(key, json.dumps(value, default=_json_serializer), ex=ttl)
-
-
-def _json_serializer(obj):
-    """Handle non-standard JSON types (e.g. datetime)."""
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    raise TypeError(f"Type {type(obj)} not serializable")
-
-
 # ---------------------------------------------------------------------------
 # Public service functions
 # ---------------------------------------------------------------------------
@@ -82,18 +66,23 @@ async def get_stats(
 ) -> dict:
     """Return descriptive statistics for *metric_name*.
 
-    Cached in Redis for ``settings.CACHE_TTL_STATS`` seconds (default 300).
+    Results are cached via ``cache_service`` with ``CACHE_TTL_STATS``
+    TTL (default 300 s).  The cache is invalidated automatically
+    when new datapoints are written via ``datapoint_service``.
 
-    Returns
-    -------
-    dict with keys: ``count``, ``mean``, ``min``, ``max``,
-    ``std_dev`` (sample std, ``None`` if count < 2), ``median``.
+    Args:
+        db: Active async SQLAlchemy session.
+        metric_name: Name of the metric to analyse.
+
+    Returns:
+        Dict with keys: ``metric_name``, ``count``, ``mean``, ``min``,
+        ``max``, ``std_dev`` (sample std, ``None`` if count < 2), ``median``.
+
+    Raises:
+        MetricNotFoundError: When the metric does not exist.
+        InvalidDataError: When the metric has no datapoints.
     """
-    from app.config import settings
-
-    redis = get_redis()
-    cache_key = _cache_key(metric_name, "stats")
-    cached = await _get_cached(redis, cache_key)
+    cached = await cache_service.get_stats_cache(metric_name)
     if cached is not None:
         return cached
 
@@ -112,7 +101,7 @@ async def get_stats(
         "std_dev": round(std_dev, 6) if std_dev is not None else None,
         "median": round(median, 6),
     }
-    await _set_cached(redis, cache_key, result, settings.CACHE_TTL_STATS)
+    await cache_service.set_stats_cache(metric_name, result)
     return result
 
 
@@ -132,19 +121,23 @@ async def get_anomalies(
 
     Values outside ``[lower, upper]`` are flagged as anomalies.
 
-    Cached in Redis for ``settings.CACHE_TTL_ANOMALIES`` seconds (default 60).
+    Results are cached via ``cache_service`` with ``CACHE_TTL_ANOMALIES``
+    TTL (default 60 s).
 
-    Returns
-    -------
-    dict with keys: ``metric_name``, ``anomaly_count``,
-    ``threshold_lower``, ``threshold_upper``, ``anomalies`` (list of
-    ``{"id": ..., "value": ..., "timestamp": ...}``).
+    Args:
+        db: Active async SQLAlchemy session.
+        metric_name: Name of the metric to analyse.
+
+    Returns:
+        Dict with keys: ``metric_name``, ``anomaly_count``,
+        ``threshold_lower``, ``threshold_upper``, ``anomalies`` (list of
+        ``{"id": ..., "value": ..., "timestamp": ...}``).
+
+    Raises:
+        MetricNotFoundError: When the metric does not exist.
+        InvalidDataError: When the metric has no datapoints.
     """
-    from app.config import settings
-
-    redis = get_redis()
-    cache_key = _cache_key(metric_name, "anomalies")
-    cached = await _get_cached(redis, cache_key)
+    cached = await cache_service.get_anomalies_cache(metric_name)
     if cached is not None:
         return cached
 
@@ -165,7 +158,7 @@ async def get_anomalies(
     sorted_vals = sorted(values)
 
     # IQR method — more robust to extreme values than 3-sigma
-    q1, q2, q3 = statistics.quantiles(sorted_vals, n=4)
+    q1, _q2, q3 = statistics.quantiles(sorted_vals, n=4)
     iqr = q3 - q1
     lower = q1 - 1.5 * iqr
     upper = q3 + 1.5 * iqr
@@ -187,7 +180,7 @@ async def get_anomalies(
         "anomaly_count": len(anomalies),
         "anomalies": anomalies,
     }
-    await _set_cached(redis, cache_key, result, settings.CACHE_TTL_ANOMALIES)
+    await cache_service.set_anomalies_cache(metric_name, result)
     return result
 
 
@@ -198,26 +191,29 @@ async def get_moving_average(
 ) -> dict:
     """Return a simple moving-average series for *metric_name*.
 
-    Parameters
-    ----------
-    window : int, default ``7``
-        Window size in number of data points (not time-based).
+    The window is **point-based** (not time-based): each output value
+    is the mean of the current point and the previous ``window - 1`` points.
 
-    Cached in Redis for ``settings.CACHE_TTL_MA`` seconds (default 600).
+    Results are cached via ``cache_service`` with ``CACHE_TTL_MA``
+    TTL (default 600 s), keyed by both metric name and window size.
 
-    Returns
-    -------
-    dict with keys: ``metric_name``, ``window``, ``data_points`` (list of
-    ``{"timestamp": ..., "value": ..., "moving_average": ...}``).
+    Args:
+        db: Active async SQLAlchemy session.
+        metric_name: Name of the metric to analyse.
+        window: Window size in number of data points (≥ 1).
+
+    Returns:
+        Dict with keys: ``metric_name``, ``window``, ``data_points``
+        (list of ``{"timestamp": ..., "value": ..., "moving_average": ...}``).
+
+    Raises:
+        InvalidDataError: When ``window < 1`` or the metric has no datapoints.
+        MetricNotFoundError: When the metric does not exist.
     """
-    from app.config import settings
-
     if window < 1:
         raise InvalidDataError("window 必须大于 0")
 
-    redis = get_redis()
-    cache_key = _cache_key(metric_name, f"ma_{window}")
-    cached = await _get_cached(redis, cache_key)
+    cached = await cache_service.get_moving_average_cache(metric_name, window)
     if cached is not None:
         return cached
 
@@ -250,5 +246,5 @@ async def get_moving_average(
         "window": window,
         "data_points": result_series,
     }
-    await _set_cached(redis, cache_key, result, settings.CACHE_TTL_MA)
+    await cache_service.set_moving_average_cache(metric_name, window, result)
     return result

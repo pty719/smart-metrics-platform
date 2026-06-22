@@ -2,6 +2,14 @@
 
 Handles uploading, querying, and retrieving latest values for datapoints
 belonging to a metric.
+
+Cache contract
+--------------
+Every write operation (``create_datapoints``) **must** call
+``cache_service.invalidate_metric_cache`` so that stale statistics,
+anomaly results, and moving-average series are evicted from Redis
+immediately.  Read operations never touch the cache — that is the
+responsibility of the stats_service layer.
 """
 from __future__ import annotations
 
@@ -14,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import InvalidDataError, MetricNotFoundError
 from app.models.datapoint import Datapoint
 from app.models.metric import Metric
+from app.services import cache_service
 
 
 async def _get_metric_or_404(db: AsyncSession, name: str) -> Metric:
@@ -65,6 +74,11 @@ async def create_datapoints(
     await db.flush()
     for r in records:
         await db.refresh(r)
+
+    # Invalidate all cached stats/anomalies/moving-average for this metric
+    # so subsequent reads always reflect the freshly uploaded data.
+    await cache_service.invalidate_metric_cache(metric_name)
+
     return records
 
 

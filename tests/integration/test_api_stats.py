@@ -5,7 +5,6 @@ Redis is mocked so that no external Redis instance is required.
 """
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,20 +15,20 @@ from httpx import AsyncClient
 
 
 def _mock_redis() -> AsyncMock:
-    """Mock Redis client — always cache-miss, silence set."""
+    """Mock Redis client — always cache-miss, silence set/unlink/scan."""
     m = AsyncMock()
     m.get.return_value = None
     m.set.return_value = True
+    m.unlink.return_value = 0
+    m.scan.return_value = (0, [])
     return m
 
 
 @pytest.fixture(autouse=True)
 def _patch_redis():
-    """Automatically patch ``get_redis`` for every test in this module."""
+    """Automatically patch ``get_redis`` in *cache_service* for every test."""
     mock = _mock_redis()
-    with (
-        patch("app.services.stats_service.get_redis", return_value=mock),
-    ):
+    with patch("app.services.cache_service.get_redis", return_value=mock):
         yield
 
 
